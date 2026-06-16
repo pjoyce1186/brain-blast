@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
 // ============================================================================
 // STORAGE LAYER — uses localStorage so progress persists across browser
@@ -54,10 +54,20 @@ const defaultSave = {
     totalSecondsLearned: 0,
     secondsToday: 0,
     timeByDay: {}, // { "YYYY-MM-DD": seconds }
+    totalCoinsEarned: 0, // lifetime coins earned (never decreases)
   },
   crunchlab: {
     completed: [],
     inProgress: {},
+  },
+  sciencelab: {
+    completed: [],
+    inProgress: {},
+  },
+  canes: {
+    completed: [],
+    inProgress: {},
+    mistakes: 0, // total wrong answers in Canes Corner (for perfect-run badge)
   },
 };
 
@@ -230,18 +240,7 @@ const wordProblemTemplates = {
     (a) => ({ q: `🎮 Each controller has 4 buttons on top. With ${a} controllers, how many buttons?`, ans: a * 4 }),
   ],
   time: [
-    () => {
-      const h = 1 + Math.floor(Math.random() * 11);
-      const m = [0, 15, 30, 45][Math.floor(Math.random() * 4)];
-      const display = `${h}:${m.toString().padStart(2, "0")}`;
-      const options = [];
-      const correct = `${h} ${m === 0 ? "o'clock" : m === 15 ? "fifteen" : m === 30 ? "thirty" : "forty-five"}`;
-      return {
-        q: `⏰ A clock reads ${display}. How do you say this time?`,
-        options: [correct, `${h - 1 || 12} ${m === 0 ? "o'clock" : m === 15 ? "fifteen" : m === 30 ? "thirty" : "forty-five"}`, `${h} ${m === 0 ? "fifteen" : m === 15 ? "thirty" : m === 30 ? "o'clock" : "fifteen"}`].sort(() => Math.random() - 0.5),
-        ans: correct,
-      };
-    },
+    () => generateClockQuestion(),
   ],
   money: [
     () => {
@@ -260,20 +259,75 @@ const wordProblemTemplates = {
 // ============================================================================
 // BADGES — funny, themed, achievement-driven
 // ============================================================================
+// Each badge optionally carries a `check(save)` predicate. A central effect
+// in <App> grants any badge whose check passes, so badges are awarded
+// automatically wherever the relevant stats change. Event-only badges
+// (first_word, speed_demon, etc.) have no check and are granted inline.
 const ALL_BADGES = [
+  // ── Original badges ──────────────────────────────────────────
   { id: "first_word", name: "Rookie Speller", emoji: "🥉", desc: "Spell your first word right" },
   { id: "first_math", name: "Calculator Brain", emoji: "🧮", desc: "Solve your first math problem" },
-  { id: "hat_trick", name: "Hat Trick", emoji: "🎩", desc: "Get 3 correct in a row" },
-  { id: "streak_10", name: "On Fire", emoji: "🔥", desc: "Hit a 10-answer streak" },
-  { id: "streak_20", name: "ICE COLD", emoji: "🥶", desc: "20 correct in a row. Unreal." },
+  { id: "hat_trick", name: "Hat Trick", emoji: "🎩", desc: "Get 3 correct in a row", check: (s) => s.stats.bestStreak >= 3 },
+  { id: "streak_10", name: "On Fire", emoji: "🔥", desc: "Hit a 10-answer streak", check: (s) => s.stats.bestStreak >= 10 },
+  { id: "streak_20", name: "ICE COLD", emoji: "🥶", desc: "20 correct in a row. Unreal.", check: (s) => s.stats.bestStreak >= 20 },
   { id: "rober_lab", name: "Rober Lab Engineer", emoji: "🧪", desc: "Complete an engineering set" },
-  { id: "level5", name: "Level 5 Pro", emoji: "⭐", desc: "Reach Level 5" },
-  { id: "level10", name: "Double Digits", emoji: "🌟", desc: "Reach Level 10" },
-  { id: "level20", name: "Legendary", emoji: "👑", desc: "Reach Level 20" },
-  { id: "math_master", name: "Math Master", emoji: "📐", desc: "Master 25 math facts" },
-  { id: "word_wizard", name: "Word Wizard", emoji: "🧙", desc: "Master 25 spelling words" },
+  { id: "level5", name: "Level 5 Pro", emoji: "⭐", desc: "Reach Level 5", check: (s) => s.level >= 5 },
+  { id: "level10", name: "Double Digits", emoji: "🌟", desc: "Reach Level 10", check: (s) => s.level >= 10 },
+  { id: "level20", name: "Legendary", emoji: "👑", desc: "Reach Level 20", check: (s) => s.level >= 20 },
+  { id: "math_master", name: "Math Master", emoji: "📐", desc: "Master 25 math facts", check: (s) => s.math.masteredFacts.length >= 25 },
+  { id: "word_wizard", name: "Word Wizard", emoji: "🧙", desc: "Master 25 spelling words", check: (s) => s.spelling.mastered.length >= 25 },
   { id: "speed_demon", name: "Speed Demon", emoji: "⚡", desc: "Beat the Clock with 10 right" },
-  { id: "coin_baron", name: "Coin Baron", emoji: "💎", desc: "Earn 500 coins total" },
+  { id: "coin_baron", name: "Coin Baron", emoji: "💎", desc: "Earn 500 coins total", check: (s) => (s.stats.totalCoinsEarned || 0) >= 500 },
+
+  // ── Long streak badges ───────────────────────────────────────
+  { id: "streak_25", name: "Hot Streak Hero", emoji: "🌋", desc: "25 correct in a row", check: (s) => s.stats.bestStreak >= 25 },
+  { id: "streak_50", name: "Unstoppable", emoji: "🚨", desc: "50 correct in a row", check: (s) => s.stats.bestStreak >= 50 },
+  { id: "streak_100", name: "Centurion", emoji: "💯", desc: "100 correct in a row!", check: (s) => s.stats.bestStreak >= 100 },
+
+  // ── Spelling mastery ─────────────────────────────────────────
+  { id: "words_50", name: "Spelling Sniper", emoji: "🎯", desc: "Master 50 words", check: (s) => s.spelling.mastered.length >= 50 },
+  { id: "words_75", name: "Word Warrior", emoji: "⚔️", desc: "Master 75 words", check: (s) => s.spelling.mastered.length >= 75 },
+  { id: "words_100", name: "Dictionary Destroyer", emoji: "📚", desc: "Master 100 words", check: (s) => s.spelling.mastered.length >= 100 },
+
+  // ── Math mastery ─────────────────────────────────────────────
+  { id: "math_50", name: "Iron Mathematician", emoji: "🦾", desc: "Master 50 math facts", check: (s) => s.math.masteredFacts.length >= 50 },
+  { id: "math_100", name: "Number Ninja", emoji: "🥷", desc: "Master 100 math facts", check: (s) => s.math.masteredFacts.length >= 100 },
+
+  // ── XP milestones ────────────────────────────────────────────
+  { id: "xp_1000", name: "XP Hunter", emoji: "⚡", desc: "Earn 1,000 total XP", check: (s) => s.xp >= 1000 },
+  { id: "xp_5000", name: "XP Machine", emoji: "🤖", desc: "Earn 5,000 total XP", check: (s) => s.xp >= 5000 },
+  { id: "xp_10000", name: "Brain Blast Champion", emoji: "🏆", desc: "Earn 10,000 total XP!", check: (s) => s.xp >= 10000 },
+
+  // ── Total time milestones ────────────────────────────────────
+  { id: "time_1h", name: "Hour Grinder", emoji: "⏰", desc: "1 hour of learning", check: (s) => (s.stats.totalSecondsLearned || 0) >= 3600 },
+  { id: "time_5h", name: "Marathon Mind", emoji: "🏃", desc: "5 hours of learning", check: (s) => (s.stats.totalSecondsLearned || 0) >= 18000 },
+  { id: "time_10h", name: "Time Lord", emoji: "🕰️", desc: "10 hours of learning", check: (s) => (s.stats.totalSecondsLearned || 0) >= 36000 },
+
+  // ── Daily return streaks ─────────────────────────────────────
+  { id: "days_3", name: "Three-Peat", emoji: "📅", desc: "3-day play streak", check: (s) => (s.streakDaily || 0) >= 3 },
+  { id: "days_7", name: "Week Streak", emoji: "🗓️", desc: "7-day play streak", check: (s) => (s.streakDaily || 0) >= 7 },
+  { id: "days_14", name: "Two-Week Titan", emoji: "📆", desc: "14-day play streak", check: (s) => (s.streakDaily || 0) >= 14 },
+  { id: "days_30", name: "30-Day Legend", emoji: "🔱", desc: "30-day play streak!", check: (s) => (s.streakDaily || 0) >= 30 },
+
+  // ── CrunchLab missions ───────────────────────────────────────
+  { id: "crunch_5", name: "Lab Rat", emoji: "🐀", desc: "Finish 5 CrunchLab missions", check: (s) => (s.crunchlab?.completed?.length || 0) >= 5 },
+  { id: "crunch_10", name: "Mad Scientist", emoji: "⚗️", desc: "Finish 10 CrunchLab missions", check: (s) => (s.crunchlab?.completed?.length || 0) >= 10 },
+  { id: "crunch_all", name: "CrunchLab Master", emoji: "🥼", desc: "Finish every CrunchLab mission", check: (s) => (s.crunchlab?.completed?.length || 0) >= CRUNCH_CHALLENGES.length },
+
+  // ── Coins ────────────────────────────────────────────────────
+  { id: "coins_1000", name: "Coin Tycoon", emoji: "💰", desc: "Earn 1,000 coins total", check: (s) => (s.stats.totalCoinsEarned || 0) >= 1000 },
+
+  // ── Science Lab ──────────────────────────────────────────────
+  { id: "science_lab", name: "Junior Scientist", emoji: "🔬", desc: "Complete a Science Lab experiment" },
+  { id: "science_5", name: "Beaker Boss", emoji: "🧫", desc: "Finish 5 Science Lab experiments", check: (s) => (s.sciencelab?.completed?.length || 0) >= 5 },
+  { id: "science_master", name: "Science Whiz", emoji: "🧠", desc: "Finish every Science Lab experiment", check: (s) => (s.sciencelab?.completed?.length || 0) >= SCIENCE_LAB.length },
+
+  // ── Canes Corner ─────────────────────────────────────────────
+  { id: "canes_fan", name: "Canes Fan", emoji: "🏒", desc: "Complete Canes Corner", check: (s) => (s.canes?.completed?.length || 0) >= CANES_GAMES.length },
+  { id: "canes_champ", name: "Stanley Cup Champion", emoji: "🏆", desc: "Ace every Canes Corner question", check: (s) => (s.canes?.completed?.length || 0) >= CANES_GAMES.length && (s.canes?.mistakes || 0) === 0 },
+
+  // ── Combo achievement ────────────────────────────────────────
+  { id: "triple_threat", name: "Triple Threat", emoji: "🎮", desc: "10 words + 10 facts + 1 mission", check: (s) => s.spelling.mastered.length >= 10 && s.math.masteredFacts.length >= 10 && (s.crunchlab?.completed?.length || 0) >= 1 },
 ];
 
 // ============================================================================
@@ -300,6 +354,15 @@ const THEMES = {
   lab: { name: "Mad Scientist", cost: 100, bg: "#0f1f17", panel: "#1a3327", accent: "#00ff88", accent2: "#88ff00", text: "#ffffff" },
   gamer: { name: "Pro Gamer", cost: 150, bg: "#1a0033", panel: "#2a0055", accent: "#ff00aa", accent2: "#00ffff", text: "#ffffff" },
   rocket: { name: "Rocket Launch", cost: 200, bg: "#1a0a2e", panel: "#2d1b69", accent: "#ff4500", accent2: "#ffd700", text: "#ffffff" },
+  // ── New themes (Enhancement 2) — priced progressively up to 800 coins ──
+  lava: { name: "Lava World", cost: 250, bg: "#1a0500", panel: "#3d0f00", accent: "#ff5500", accent2: "#ffcc00", text: "#fff5e6" },
+  arctic: { name: "Arctic Freeze", cost: 300, bg: "#04141f", panel: "#0a2f44", accent: "#7df9ff", accent2: "#ffffff", text: "#eaffff" },
+  jungle: { name: "Jungle Quest", cost: 350, bg: "#06160a", panel: "#103a1a", accent: "#7CFC00", accent2: "#ffaa00", text: "#f0fff0" },
+  dino: { name: "Dinosaur Era", cost: 450, bg: "#1a1207", panel: "#33260f", accent: "#d9a441", accent2: "#6bbf59", text: "#fff8e6" },
+  underwater: { name: "Underwater", cost: 500, bg: "#021022", panel: "#06294d", accent: "#00d4ff", accent2: "#00ffaa", text: "#e6fbff" },
+  cyberpunk: { name: "Cyberpunk City", cost: 650, bg: "#0d0221", panel: "#1a0a3d", accent: "#ff00ff", accent2: "#00f0ff", text: "#fdf0ff" },
+  haunted: { name: "Haunted Night", cost: 700, bg: "#0a0610", panel: "#1c1230", accent: "#a64dff", accent2: "#7CFC00", text: "#f3e9ff" },
+  deepspace: { name: "Deep Space", cost: 800, bg: "#01030f", panel: "#0a0f2e", accent: "#8a7dff", accent2: "#ff4da6", text: "#eef0ff" },
 };
 
 // ============================================================================
@@ -324,79 +387,57 @@ const shuffleString = (s) => {
   return result === s && s.length > 1 ? shuffleString(s) : result;
 };
 
-// Voice preference order — most natural / neural first
+// Voice preference order — tuned so iOS Safari picks a clear Siri-quality
+// voice first, then falls back to good desktop/Chrome voices.
 const VOICE_PRIORITY = [
-  "Google US English",
-  "Google UK English Female",
-  "Google UK English Male",
   "Samantha",
-  "Alex",
   "Karen",
   "Daniel",
-  "Microsoft Aria Online (Natural)",
-  "Microsoft Jenny Online (Natural)",
-  "Microsoft Guy Online (Natural)",
-  "en-US-Neural2",
+  "Moira",
+  "Google US English",
+  "Google UK English Female",
 ];
 
-let _bestVoice    = null;
-let _voicesReady  = false;
-
-// Warm up the voice list as early as possible — Chrome loads remote
-// voices asynchronously and they won't be available on the first call.
-const warmVoices = () => {
-  if (!window.speechSynthesis) return;
-  const tryLoad = () => {
-    const voices = window.speechSynthesis.getVoices();
-    if (voices.length > 0) {
-      _bestVoice   = null; // force re-pick with full list
-      _voicesReady = true;
-    }
-  };
-  tryLoad();
-  window.speechSynthesis.onvoiceschanged = () => {
-    _bestVoice   = null;
-    _voicesReady = true;
-    tryLoad();
-  };
-  // Chrome inside iframes sometimes needs a nudge — speak a silent
-  // utterance so the engine initialises and remote voices load.
+// On Chrome, remote voices load asynchronously, so we listen for
+// onvoiceschanged purely to keep the in-memory list fresh. We do NOT
+// fire a silent warm-up utterance — that breaks audio on iOS Safari.
+if (typeof window !== "undefined" && window.speechSynthesis) {
   try {
-    const silent = new SpeechSynthesisUtterance("");
-    silent.volume = 0;
-    window.speechSynthesis.speak(silent);
+    window.speechSynthesis.getVoices(); // prime the list (sync on iOS)
+    window.speechSynthesis.onvoiceschanged = () => {
+      window.speechSynthesis.getVoices();
+    };
   } catch (e) {}
-};
-// Run immediately when the module loads
-if (typeof window !== "undefined") warmVoices();
+}
 
+// Pick the best available voice fresh on every call — never cache it.
+// Caching causes iOS Safari to get stuck on a bad voice between calls.
 const getBestVoice = () => {
-  // Never serve a cached voice that was picked before remote voices loaded
-  if (_bestVoice && _voicesReady) return _bestVoice;
-
   const voices = window.speechSynthesis?.getVoices() || [];
   if (!voices.length) return null;
 
-  // 1. Try our priority list (natural / neural voices)
+  // 1. Preferred named voices, in priority order
   for (const name of VOICE_PRIORITY) {
     const v = voices.find((v) => v.name === name || v.name.startsWith(name));
-    if (v) { _bestVoice = v; return v; }
+    if (v) return v;
   }
 
-  // 2. Any non-local en-US voice (remote = higher quality in Chrome)
-  const enUS = voices.filter((v) => v.lang.startsWith("en-US") || v.lang === "en_US");
-  const remote = enUS.find((v) => !v.localService);
-  if (remote) { _bestVoice = remote; return remote; }
+  // 2. Any en-US voice that isn't the robotic eSpeak engine
+  const enUS = voices.find(
+    (v) =>
+      (v.lang === "en-US" || v.lang === "en_US") &&
+      !v.name.toLowerCase().includes("espeak")
+  );
+  if (enUS) return enUS;
 
-  // 3. Any English voice that isn't the eSpeak robot
+  // 3. Any English voice that isn't eSpeak
   const decent = voices.find(
     (v) => v.lang.startsWith("en") && !v.name.toLowerCase().includes("espeak")
   );
-  if (decent) { _bestVoice = decent; return decent; }
+  if (decent) return decent;
 
-  // 4. Absolute fallback — whatever Chrome gives us
-  _bestVoice = voices[0];
-  return _bestVoice;
+  // 4. Absolute fallback
+  return voices[0];
 };
 
 const speak = (text) => {
@@ -405,34 +446,51 @@ const speak = (text) => {
     window.speechSynthesis.cancel();
 
     const u = new SpeechSynthesisUtterance(text);
-    u.rate  = 0.82;
-    u.pitch = 1.05;
+    u.rate  = 0.78; // slow + clear for a young reader
+    u.pitch = 1.0;
     u.lang  = "en-US";
 
-    const doSpeak = () => {
-      const v = getBestVoice();
-      if (v) u.voice = v;
-      window.speechSynthesis.speak(u);
-    };
-
-    // If voices are already warmed up, speak immediately.
-    // Otherwise wait up to 1.5 s for Chrome to finish loading remote voices.
-    if (_voicesReady || window.speechSynthesis.getVoices().length > 0) {
-      doSpeak();
-    } else {
-      let fired = false;
-      const fire = () => { if (!fired) { fired = true; doSpeak(); } };
-      window.speechSynthesis.onvoiceschanged = () => {
-        _bestVoice = null;
-        _voicesReady = true;
-        fire();
-      };
-      setTimeout(fire, 1500); // give up waiting and use whatever's available
-    }
+    // Pick the voice fresh every time so iOS never gets stuck.
+    const v = getBestVoice();
+    if (v) u.voice = v;
+    window.speechSynthesis.speak(u);
   } catch (e) {}
 };
 
 const todayStr = () => new Date().toISOString().slice(0, 10);
+
+// Format an h:mm time for the analog-clock question (e.g. "3:05", "11:30")
+const fmtClockTime = (h, m) => `${h}:${m.toString().padStart(2, "0")}`;
+
+// Build an interactive analog-clock question: random kid-friendly time
+// (on the hour, quarter/half, or 5-minute interval) + 4 digital choices.
+const generateClockQuestion = () => {
+  const h = 1 + Math.floor(Math.random() * 12); // 1..12
+  const m = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55][Math.floor(Math.random() * 12)];
+  const correct = fmtClockTime(h, m);
+
+  // Generate three plausible wrong answers (other valid times)
+  const wrongs = new Set();
+  const allMins = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55];
+  let guard = 0;
+  while (wrongs.size < 3 && guard < 50) {
+    guard++;
+    const wh = 1 + Math.floor(Math.random() * 12);
+    const wm = allMins[Math.floor(Math.random() * allMins.length)];
+    const candidate = fmtClockTime(wh, wm);
+    if (candidate !== correct) wrongs.add(candidate);
+  }
+
+  const options = [correct, ...wrongs].sort(() => Math.random() - 0.5);
+  return {
+    q: "⏰ What time does the clock show?",
+    clock: true,
+    hour: h,
+    minute: m,
+    options,
+    ans: correct,
+  };
+};
 
 // ============================================================================
 // REUSABLE UI COMPONENTS
@@ -496,6 +554,152 @@ const ProgressBar = ({ value, max, accent, height = 16 }) => (
 );
 
 // ============================================================================
+// TIME TRACKER — reads/writes localStorage directly (no abstraction layer).
+//   bb-time-alltime     : running total seconds — only ever increases
+//   bb-time-today       : seconds accumulated for the current calendar day
+//   bb-time-today-date  : YYYY-MM-DD that bb-time-today belongs to
+//   bb-time-byday       : JSON { "YYYY-MM-DD": seconds } for the weekly chart
+// ============================================================================
+const TIME_K = {
+  all: "bb-time-alltime",
+  today: "bb-time-today",
+  todayDate: "bb-time-today-date",
+  byDay: "bb-time-byday",
+};
+const _timeMem = {}; // fallback if localStorage is blocked
+
+const _lsGet = (k) => {
+  try { const v = localStorage.getItem(k); if (v !== null) return v; } catch (e) {}
+  return _timeMem[k] !== undefined ? _timeMem[k] : null;
+};
+const _lsSet = (k, v) => {
+  try { localStorage.setItem(k, v); } catch (e) {}
+  _timeMem[k] = v;
+};
+
+// Returns { today, all } seconds, resetting `today` at the midnight rollover.
+const readTime = () => {
+  const t = todayStr();
+  let all = parseInt(_lsGet(TIME_K.all) || "0", 10);   if (isNaN(all)) all = 0;
+  let today = parseInt(_lsGet(TIME_K.today) || "0", 10); if (isNaN(today)) today = 0;
+  const date = _lsGet(TIME_K.todayDate) || "";
+  if (date !== t) {            // new calendar day → reset today's counter
+    today = 0;
+    _lsSet(TIME_K.today, "0");
+    _lsSet(TIME_K.todayDate, t);
+  }
+  return { today, all };
+};
+
+// Adds `secs` to today + all-time totals (and the per-day chart map).
+const addTime = (secs) => {
+  const t = todayStr();
+  let { today, all } = readTime(); // handles rollover first
+  today += secs;
+  all += secs;
+  _lsSet(TIME_K.today, String(today));
+  _lsSet(TIME_K.all, String(all));
+  _lsSet(TIME_K.todayDate, t);
+  let byDay = {};
+  try { byDay = JSON.parse(_lsGet(TIME_K.byDay) || "{}") || {}; } catch (e) {}
+  byDay[t] = (byDay[t] || 0) + secs;
+  const keys = Object.keys(byDay).sort();
+  if (keys.length > 30) keys.slice(0, keys.length - 30).forEach((k) => delete byDay[k]);
+  _lsSet(TIME_K.byDay, JSON.stringify(byDay));
+  return { today, all };
+};
+
+const readByDay = () => {
+  try { return JSON.parse(_lsGet(TIME_K.byDay) || "{}") || {}; } catch (e) { return {}; }
+};
+
+// ============================================================================
+// ANALOG CLOCK — SVG clock face for the Telling Time questions.
+// Dark neon aesthetic: glowing hands and accent-colored markers.
+// ============================================================================
+const AnalogClock = ({ hour, minute, theme }) => {
+  const size = 220;
+  const c = size / 2; // center
+  const R = c - 10;   // face radius
+
+  // Angles (12 o'clock = -90°). Minute hand: 6° per minute.
+  // Hour hand: 30° per hour + 0.5° per minute so it sits between numbers.
+  const minAngle = minute * 6 - 90;
+  const hourAngle = ((hour % 12) * 30) + (minute * 0.5) - 90;
+
+  const polar = (angleDeg, radius) => {
+    const a = (angleDeg * Math.PI) / 180;
+    return { x: c + radius * Math.cos(a), y: c + radius * Math.sin(a) };
+  };
+
+  const minTip = polar(minAngle, R * 0.78);
+  const hourTip = polar(hourAngle, R * 0.52);
+
+  // Hour number positions
+  const numbers = [];
+  for (let n = 1; n <= 12; n++) {
+    const p = polar(n * 30 - 90, R * 0.82);
+    numbers.push({ n, x: p.x, y: p.y });
+  }
+
+  // Minute tick marks
+  const ticks = [];
+  for (let i = 0; i < 60; i++) {
+    const big = i % 5 === 0;
+    const outer = polar(i * 6 - 90, R);
+    const inner = polar(i * 6 - 90, R - (big ? 14 : 7));
+    ticks.push({ i, big, x1: inner.x, y1: inner.y, x2: outer.x, y2: outer.y });
+  }
+
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}
+      style={{ display: "block", margin: "0 auto 18px", maxWidth: "70vw" }}
+      role="img" aria-label="Analog clock">
+      <defs>
+        <radialGradient id="clockFace" cx="50%" cy="42%" r="65%">
+          <stop offset="0%" stopColor={theme.panel} />
+          <stop offset="100%" stopColor={theme.bg} />
+        </radialGradient>
+      </defs>
+      {/* Face */}
+      <circle cx={c} cy={c} r={R} fill="url(#clockFace)"
+        stroke={theme.accent} strokeWidth="4"
+        style={{ filter: `drop-shadow(0 0 10px ${theme.accent}88)` }} />
+      {/* Tick marks */}
+      {ticks.map((t) => (
+        <line key={t.i} x1={t.x1} y1={t.y1} x2={t.x2} y2={t.y2}
+          stroke={t.big ? theme.accent : `${theme.text}55`}
+          strokeWidth={t.big ? 3 : 1.5} strokeLinecap="round" />
+      ))}
+      {/* Numbers */}
+      {numbers.map((nm) => (
+        <text key={nm.n} x={nm.x} y={nm.y}
+          fill={theme.text} fontSize="20" fontWeight="900"
+          fontFamily="'Fredoka', sans-serif"
+          textAnchor="middle" dominantBaseline="central">
+          {nm.n}
+        </text>
+      ))}
+      {/* Hour hand */}
+      <line x1={c} y1={c} x2={hourTip.x} y2={hourTip.y}
+        stroke={theme.accent} strokeWidth="7" strokeLinecap="round"
+        style={{ filter: `drop-shadow(0 0 6px ${theme.accent})` }} />
+      {/* Minute hand */}
+      <line x1={c} y1={c} x2={minTip.x} y2={minTip.y}
+        stroke={theme.accent2} strokeWidth="4" strokeLinecap="round"
+        style={{ filter: `drop-shadow(0 0 6px ${theme.accent2})` }} />
+      {/* Center cap */}
+      <circle cx={c} cy={c} r="8" fill={theme.accent2}
+        stroke={theme.bg} strokeWidth="2"
+        style={{ filter: `drop-shadow(0 0 6px ${theme.accent2})` }} />
+    </svg>
+  );
+};
+
+// Screens that count as "active learning" time for the time tracker
+const LEARNING_SCREENS = ["spelling", "math", "crunchlab", "sciencelab", "canes"];
+
+// ============================================================================
 // MAIN APP
 // ============================================================================
 export default function App() {
@@ -505,59 +709,58 @@ export default function App() {
   const [toast, setToast] = useState(null); // {msg, type}
   const [levelUpAnim, setLevelUpAnim] = useState(false);
 
-  // ── Time tracking ────────────────────────────────────────────
-  // Screens that count as "active learning" time
-  const LEARNING_SCREENS = ["spelling", "math", "crunchlab"];
-  const pendingSecondsRef = useRef(0);   // in-memory accumulator between flushes
-  const tickIntervalRef   = useRef(null);
-  const sessionSecondsRef = useRef(0);   // live session counter for the HUD
+  // ── Time tracking (localStorage-backed, see TIME_K helpers above) ──
+  const pendingRef = useRef(0);          // seconds counted but not yet committed
+  const sessionRef = useRef(0);          // live session counter for the HUD
   const [sessionSeconds, setSessionSeconds] = useState(0);
+  const [timeToday, setTimeToday] = useState(0);
+  const [timeAll, setTimeAll]     = useState(0);
 
-  // Flush accumulated seconds into persisted save
+  // Commit any pending seconds to localStorage and refresh the display.
+  // Also mirrors the totals into save.stats so time-based badges can fire.
   const flushTime = useCallback(() => {
-    const delta = pendingSecondsRef.current;
-    if (delta === 0) return;
-    pendingSecondsRef.current = 0;
-    const today = todayStr();
-    setSave((s) => {
-      if (!s) return s;
-      const timeByDay = { ...(s.stats.timeByDay || {}) };
-      timeByDay[today] = (timeByDay[today] || 0) + delta;
-      // Keep only last 30 days to cap storage size
-      const keys = Object.keys(timeByDay).sort();
-      if (keys.length > 30) keys.slice(0, keys.length - 30).forEach((k) => delete timeByDay[k]);
-      return {
-        ...s,
-        stats: {
-          ...s.stats,
-          totalSecondsLearned: (s.stats.totalSecondsLearned || 0) + delta,
-          secondsToday:        (s.stats.secondsToday        || 0) + delta,
-          timeByDay,
-        },
-      };
-    });
+    const d = pendingRef.current;
+    if (d <= 0) return;
+    pendingRef.current = 0;
+    const { today, all } = addTime(d);
+    setTimeToday(today);
+    setTimeAll(all);
+    const byDay = readByDay();
+    setSave((s) => (s ? {
+      ...s,
+      stats: { ...s.stats, totalSecondsLearned: all, secondsToday: today, timeByDay: byDay },
+    } : s));
   }, []);
 
-  // Start / stop the tick based on whether user is on a learning screen
+  // Initialise the displayed totals from localStorage on mount
   useEffect(() => {
-    const isLearning = LEARNING_SCREENS.includes(screen);
-    if (isLearning) {
-      tickIntervalRef.current = setInterval(() => {
-        pendingSecondsRef.current += 1;
-        sessionSecondsRef.current += 1;
-        setSessionSeconds(sessionSecondsRef.current);
-        // Flush to save every 30 seconds
-        if (pendingSecondsRef.current % 30 === 0) flushTime();
-      }, 1000);
-    } else {
-      // Leaving a learning screen — flush whatever is pending
+    const { today, all } = readTime();
+    setTimeToday(today);
+    setTimeAll(all);
+  }, []);
+
+  // Tick once per second only while on a learning screen
+  useEffect(() => {
+    if (!LEARNING_SCREENS.includes(screen)) {
       flushTime();
-      clearInterval(tickIntervalRef.current);
+      return;
     }
-    return () => clearInterval(tickIntervalRef.current);
+    const id = setInterval(() => {
+      pendingRef.current += 1;
+      sessionRef.current += 1;
+      setSessionSeconds(sessionRef.current);
+      // optimistic live display; flushTime() reconciles from storage
+      setTimeToday((v) => v + 1);
+      setTimeAll((v) => v + 1);
+      if (pendingRef.current >= 10) flushTime(); // commit every 10s
+    }, 1000);
+    return () => {
+      flushTime();
+      clearInterval(id);
+    };
   }, [screen, flushTime]);
 
-  // Flush on tab hide / page close
+  // Flush immediately on tab hide / page close
   useEffect(() => {
     const onVisibility = () => {
       if (document.hidden) flushTime();
@@ -580,6 +783,8 @@ export default function App() {
         shop:       { ...defaultSave.shop,        ...(loaded.shop       || {}) },
         stats:      { ...defaultSave.stats,       ...(loaded.stats      || {}) },
         crunchlab:  { ...defaultSave.crunchlab,   ...(loaded.crunchlab  || {}) },
+        sciencelab: { ...defaultSave.sciencelab,  ...(loaded.sciencelab || {}) },
+        canes:      { ...defaultSave.canes,       ...(loaded.canes      || {}) },
       };
       // Daily streak logic
       const today = todayStr();
@@ -595,7 +800,7 @@ export default function App() {
           merged.streakDaily = 1;
         }
         merged.lastPlayedDate = today;
-        merged.stats.secondsToday = 0;   // fresh day → reset today counter
+        // (today's learning seconds reset is handled by the time tracker)
         // reset session math streak each day
         merged.math.streakInSession = 0;
       }
@@ -633,7 +838,8 @@ export default function App() {
     setSave((s) => {
       const newXP = s.xp + amount;
       const newCoins = s.coins + coinAmount;
-      const newTotalEarned = (s.stats.totalCorrect || 0) * 5; // approximate
+      // Track lifetime coins earned (never decreases, even when spending)
+      const totalCoinsEarned = (s.stats.totalCoinsEarned || 0) + (coinAmount > 0 ? coinAmount : 0);
       // Check level up
       let newLevel = s.level;
       while (newXP >= totalXpToLevel(newLevel + 1)) {
@@ -644,14 +850,31 @@ export default function App() {
         setLevelUpAnim(true);
         setTimeout(() => setLevelUpAnim(false), 2500);
         setTimeout(() => fireConfetti(), 200);
-        if (newLevel >= 5) setTimeout(() => grantBadge("level5"), 100);
-        if (newLevel >= 10) setTimeout(() => grantBadge("level10"), 100);
-        if (newLevel >= 20) setTimeout(() => grantBadge("level20"), 100);
       }
-      if (newCoins >= 500) setTimeout(() => grantBadge("coin_baron"), 100);
-      return { ...s, xp: newXP, coins: newCoins, level: newLevel };
+      return {
+        ...s,
+        xp: newXP,
+        coins: newCoins,
+        level: newLevel,
+        stats: { ...s.stats, totalCoinsEarned },
+      };
     });
-  }, [grantBadge]);
+  }, []);
+
+  // ── Central badge engine ────────────────────────────────────
+  // Whenever the save changes, grant any stat-based badge whose check
+  // passes. This is the single source of truth for stat badges, so they
+  // get awarded everywhere relevant stats update (XP, time, streaks, etc.).
+  useEffect(() => {
+    if (!save) return;
+    const newlyEarned = ALL_BADGES.filter(
+      (b) => typeof b.check === "function" && !save.badges.includes(b.id) && b.check(save)
+    );
+    if (newlyEarned.length === 0) return;
+    // Grant the first new badge per tick so the toast/confetti is visible;
+    // remaining ones are picked up on the next save change.
+    grantBadge(newlyEarned[0].id);
+  }, [save, grantBadge]);
 
   if (!save) {
     return (
@@ -727,7 +950,8 @@ export default function App() {
 
       <div style={{ maxWidth: 900, margin: "0 auto" }}>
         <Header save={save} theme={theme} onSettings={() => setScreen("settings")}
-          sessionSeconds={sessionSeconds} isLearning={["spelling","math","crunchlab"].includes(screen)} />
+          sessionSeconds={sessionSeconds} timeToday={timeToday} timeAll={timeAll}
+          isLearning={LEARNING_SCREENS.includes(screen)} />
 
         {screen === "home" && (
           <HomeScreen save={save} theme={theme} setScreen={setScreen} />
@@ -751,10 +975,24 @@ export default function App() {
           <BadgesScreen save={save} theme={theme} back={() => setScreen("home")} />
         )}
         {screen === "settings" && (
-          <Settings save={save} setSave={setSave} theme={theme} back={() => setScreen("home")} />
+          <Settings save={save} setSave={setSave} theme={theme} back={() => setScreen("home")}
+            timeToday={timeToday} timeAll={timeAll} />
         )}
         {screen === "crunchlab" && (
-          <CrunchLabScreen save={save} setSave={setSave} theme={theme}
+          <MissionModule key="crunchlab" config={CRUNCHLAB_CONFIG}
+            save={save} setSave={setSave} theme={theme}
+            addXP={addXP} grantBadge={grantBadge} showToast={showToast}
+            fireConfetti={fireConfetti} back={() => setScreen("home")} />
+        )}
+        {screen === "sciencelab" && (
+          <MissionModule key="sciencelab" config={SCIENCELAB_CONFIG}
+            save={save} setSave={setSave} theme={theme}
+            addXP={addXP} grantBadge={grantBadge} showToast={showToast}
+            fireConfetti={fireConfetti} back={() => setScreen("home")} />
+        )}
+        {screen === "canes" && (
+          <MissionModule key="canes" config={CANES_CONFIG}
+            save={save} setSave={setSave} theme={theme}
             addXP={addXP} grantBadge={grantBadge} showToast={showToast}
             fireConfetti={fireConfetti} back={() => setScreen("home")} />
         )}
@@ -829,7 +1067,7 @@ const fmtTime = (secs) => {
 // ============================================================================
 // HEADER (always visible top bar with level, XP, coins, streak)
 // ============================================================================
-function Header({ save, theme, onSettings, sessionSeconds, isLearning }) {
+function Header({ save, theme, onSettings, sessionSeconds, timeToday, timeAll, isLearning }) {
   const xpInLevel = save.xp - totalXpToLevel(save.level);
   const xpNeeded = xpForLevel(save.level);
 
@@ -900,8 +1138,8 @@ function Header({ save, theme, onSettings, sessionSeconds, isLearning }) {
 
       {/* Time row — always visible, two chips side by side */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 8 }}>
-        <StatChip label="TODAY" value={fmtTime(save.stats?.secondsToday || 0)} icon="⏱️" color="#a78bfa" small />
-        <StatChip label="ALL TIME" value={fmtTime(save.stats?.totalSecondsLearned || 0)} icon="🕰️" color="#a78bfa" small />
+        <StatChip label="TODAY" value={fmtTime(timeToday || 0)} icon="⏱️" color="#a78bfa" small />
+        <StatChip label="ALL TIME" value={fmtTime(timeAll || 0)} icon="🕰️" color="#a78bfa" small />
       </div>
 
       {/* Live session timer — only shown while actively learning */}
@@ -967,7 +1205,9 @@ function HomeScreen({ save, theme, setScreen }) {
   const cards = [
     { id: "spelling", title: "SPELLING", emoji: "✏️", desc: "Word packs & challenges", color: theme.accent },
     { id: "math", title: "MATH", emoji: "🧮", desc: "Add, subtract, multiply!", color: theme.accent2 },
-    { id: "crunchlab", title: "CRUNCHLAB", emoji: "🧪", desc: "Science missions unlocked!", color: "#00ff88" },
+    { id: "crunchlab", title: "CRUNCHLAB", emoji: "🧪", desc: "Mark Rober science missions!", color: "#00ff88" },
+    { id: "sciencelab", title: "SCIENCE LAB", emoji: "🔬", desc: "Experiment & solve!", color: "#22d3ee" },
+    { id: "canes", title: "CANES CORNER", emoji: "🏒", desc: "2026 Stanley Cup math!", color: "#CC0000" },
     { id: "badges", title: "BADGES", emoji: "🏅", desc: `${save.badges.length} / ${ALL_BADGES.length} unlocked`, color: "#ffd700" },
     { id: "shop", title: "SHOP", emoji: "🛒", desc: `${save.coins} coins to spend`, color: "#ff6b00" },
   ];
@@ -1062,13 +1302,19 @@ function SpellingModule({ save, setSave, theme, addXP, grantBadge, showToast, fi
   const [packCorrect, setPackCorrect] = useState(0);
   const [blankIdx, setBlankIdx] = useState(0);
   const [scrambled, setScrambled] = useState("");
+  const [replayMode, setReplayMode] = useState(false); // true = pack fully mastered, no XP
   const inputRef = useRef(null);
 
   const masteredSet = useMemo(() => new Set(save.spelling.mastered), [save.spelling.mastered]);
 
+  // A pack is "complete" once every word in it has been mastered.
+  const isPackComplete = (p) => p.words.every((w) => masteredSet.has(w));
+
   const startPack = (packKey) => {
     setPack(packKey);
     const p = SPELLING_PACKS[packKey];
+    const complete = isPackComplete(p);
+    setReplayMode(complete); // already mastered → replay for fun, no rewards
     // Prioritize needs-practice from this pack, then unmastered words
     const needs = save.spelling.needsPractice.filter((w) => p.words.includes(w));
     const remaining = p.words.filter((w) => !masteredSet.has(w) && !needs.includes(w));
@@ -1122,10 +1368,12 @@ function SpellingModule({ save, setSave, theme, addXP, grantBadge, showToast, fi
     if (isRight) {
       const newStreak = streak + 1;
       setStreak(newStreak);
-      setFeedback({ type: "correct", text: pickRandom(["🎯 Perfect!", "💥 Boom!", "⚡ Crushed it!", "🏆 Got it!", "🔥 Nailed!"]) });
-      addXP(10, 2);
+      setFeedback({ type: "correct", text: replayMode
+        ? pickRandom(["🎯 Perfect! (practice)", "💥 Boom! (practice)", "⚡ Nailed it! (practice)"])
+        : pickRandom(["🎯 Perfect!", "💥 Boom!", "⚡ Crushed it!", "🏆 Got it!", "🔥 Nailed!"]) });
+      if (!replayMode) addXP(10, 2); // mastered pack replays earn no XP / coins
 
-      // Update save
+      // Update save (streak/stats still count; mastery already set in replay)
       setSave((s) => {
         const newMastered = s.spelling.mastered.includes(currentWord)
           ? s.spelling.mastered
@@ -1175,12 +1423,13 @@ function SpellingModule({ save, setSave, theme, addXP, grantBadge, showToast, fi
         },
         stats: { ...s.stats, totalWrong: s.stats.totalWrong + 1 },
       }));
+      // Longer pause so the learner can read & absorb the correct spelling
       setTimeout(() => {
         // re-queue word at the end so it comes back
         const newQueue = [...queue.slice(1), currentWord];
         setQueue(newQueue);
         nextWord(newQueue);
-      }, 3500);
+      }, 4500);
     }
   };
 
@@ -1192,6 +1441,7 @@ function SpellingModule({ save, setSave, theme, addXP, grantBadge, showToast, fi
           {Object.entries(SPELLING_PACKS).map(([key, p]) => {
             const masteredCount = p.words.filter((w) => masteredSet.has(w)).length;
             const pct = Math.round((masteredCount / p.words.length) * 100);
+            const complete = masteredCount === p.words.length;
             return (
               <button
                 key={key}
@@ -1199,27 +1449,39 @@ function SpellingModule({ save, setSave, theme, addXP, grantBadge, showToast, fi
                 onClick={() => startPack(key)}
                 style={{
                   background: `linear-gradient(135deg, ${p.color}22, ${theme.panel})`,
-                  border: `2px solid ${p.color}`,
+                  border: `2px solid ${complete ? "#22c55e" : p.color}`,
                   borderRadius: 16,
                   padding: 16,
                   color: theme.text,
                   textAlign: "left",
                   cursor: "pointer",
-                  boxShadow: `0 6px 20px rgba(0,0,0,0.25)`,
+                  position: "relative",
+                  boxShadow: complete ? "0 6px 20px rgba(34,197,94,0.25)" : `0 6px 20px rgba(0,0,0,0.25)`,
                 }}
               >
+                {complete && (
+                  <div style={{
+                    position: "absolute", top: 10, right: 10,
+                    background: "#22c55e", color: "#04210f",
+                    fontSize: 11, fontWeight: 900, letterSpacing: 0.5,
+                    padding: "3px 10px", borderRadius: 999,
+                    boxShadow: "0 0 12px #22c55e88",
+                  }}>
+                    COMPLETE ✓
+                  </div>
+                )}
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
                   <span style={{ fontSize: 32 }}>{p.emoji}</span>
-                  <div className="display-font" style={{ fontSize: 18, fontWeight: 900, color: p.color }}>
+                  <div className="display-font" style={{ fontSize: 18, fontWeight: 900, color: complete ? "#22c55e" : p.color }}>
                     {p.name}
                   </div>
                 </div>
                 <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 10, minHeight: 32 }}>
                   {p.pattern}
                 </div>
-                <ProgressBar value={masteredCount} max={p.words.length} accent={p.color} height={10} />
+                <ProgressBar value={masteredCount} max={p.words.length} accent={complete ? "#22c55e" : p.color} height={10} />
                 <div style={{ fontSize: 11, opacity: 0.7, marginTop: 4 }}>
-                  {masteredCount} / {p.words.length} mastered ({pct}%)
+                  {complete ? "Mastered! Replay for fun (no XP)" : `${masteredCount} / ${p.words.length} mastered (${pct}%)`}
                 </div>
               </button>
             );
@@ -1302,6 +1564,18 @@ function SpellingModule({ save, setSave, theme, addXP, grantBadge, showToast, fi
   return (
     <div style={{ animation: "slideUp 0.4s" }}>
       <BackBar back={back} title={`${packData.emoji} ${packData.name}`} theme={theme} />
+
+      {replayMode && (
+        <div style={{
+          background: "rgba(34,197,94,0.12)",
+          border: "1px solid #22c55e66",
+          color: "#22c55e",
+          borderRadius: 10, padding: "6px 12px", marginBottom: 12,
+          fontSize: 12, fontWeight: 900, textAlign: "center",
+        }}>
+          🔁 Replay mode — already mastered, no XP
+        </div>
+      )}
 
       <div style={{ marginBottom: 12, display: "flex", justifyContent: "space-between", fontSize: 12, opacity: 0.7 }}>
         <span>Progress</span>
@@ -1581,10 +1855,13 @@ function MathModule({ save, setSave, theme, addXP, grantBadge, showToast, fireCo
     newQuestion(topic, difficulty);
   };
 
-  const submit = () => {
+  const submit = (override) => {
     if (!question) return;
-    const guess = question.options ? input : input.trim();
-    if (!guess) return;
+    // For multiple-choice, the clicked value is passed directly so we don't
+    // depend on the async `input` state update landing first.
+    const raw = override !== undefined ? override : input;
+    const guess = question.options ? raw : String(raw).trim();
+    if (guess === "" || guess === undefined || guess === null) return;
     const isRight = question.options
       ? guess === question.ans
       : Number(guess) === Number(question.ans);
@@ -1664,7 +1941,8 @@ function MathModule({ save, setSave, theme, addXP, grantBadge, showToast, fireCo
         setWrongStreak(0);
       }
 
-      setTimeout(() => newQuestion(topic, difficulty), 3500);
+      // Longer pause so the learner can read & absorb the correct answer
+      setTimeout(() => newQuestion(topic, difficulty), 4500);
     }
   };
 
@@ -1674,7 +1952,6 @@ function MathModule({ save, setSave, theme, addXP, grantBadge, showToast, fireCo
     const unlockedMissions = CRUNCH_CHALLENGES.filter((c) => save.level >= c.unlockLevel);
     const lockedMissions   = CRUNCH_CHALLENGES.filter((c) => save.level < c.unlockLevel);
     const nextMission      = unlockedMissions.find((c) => !completedIds.includes(c.id));
-    const nextLocked       = lockedMissions[0];
     const completedCount   = completedIds.length;
     const totalMissions    = CRUNCH_CHALLENGES.length;
 
@@ -2056,7 +2333,11 @@ function MathModule({ save, setSave, theme, addXP, grantBadge, showToast, fireCo
           {question?.q}
         </div>
 
-        {question?.q && question.q.length > 30 && (
+        {question?.clock && (
+          <AnalogClock hour={question.hour} minute={question.minute} theme={theme} />
+        )}
+
+        {question?.q && !question.clock && question.q.length > 30 && (
           <button
             onClick={() => speak(question.q.replace(/[🏀⚽🏈🚀🎮🧪🤖⏰💰🏆🎯🏟️🪐🏎️📖🔢➕➖✌️🥉🍀🖐️]/g, ""))}
             style={{
@@ -2073,7 +2354,7 @@ function MathModule({ save, setSave, theme, addXP, grantBadge, showToast, fireCo
             {question.options.map((opt) => (
               <button
                 key={opt}
-                onClick={() => { setInput(opt); setTimeout(submit, 50); }}
+                onClick={() => { setInput(opt); submit(opt); }}
                 disabled={!!feedback}
                 style={{
                   background: feedback && opt === question.ans ? "#22c55e" :
@@ -2517,9 +2798,17 @@ const CRUNCH_CHALLENGES = [
 ];
 
 // ============================================================================
-// CRUNCHLAB SCREEN
+// MISSION MODULE — generic question-mission screen shared by CrunchLab,
+// Science Lab, and Canes Corner. Driven entirely by a `config` object
+// (see CRUNCHLAB_CONFIG / SCIENCELAB_CONFIG / CANES_CONFIG below).
 // ============================================================================
-function CrunchLabScreen({ save, setSave, theme, addXP, grantBadge, showToast, fireConfetti, back }) {
+function MissionModule({ config, save, setSave, theme, addXP, grantBadge, showToast, fireConfetti, back }) {
+  const {
+    saveKey, missions, accent, title, blurbTitle, blurb, factLabel,
+    completeBadgeId, alwaysUnlocked, trackMistakes,
+    xpPerQ, coinPerQ, completeXP, completeCoins,
+  } = config;
+
   const [activeMission, setActiveMission] = useState(null);
   const [missionPhase, setMissionPhase] = useState("intro");
   const [qIndex, setQIndex] = useState(0);
@@ -2527,13 +2816,15 @@ function CrunchLabScreen({ save, setSave, theme, addXP, grantBadge, showToast, f
   const [feedback, setFeedback] = useState(null);
   const [wrongsThisQ, setWrongsThisQ] = useState(0);
   const [qCorrect, setQCorrect] = useState([]);
+  const [replay, setReplay] = useState(false); // replaying an already-finished mission
   const inputRef = useRef(null);
 
-  const completed = save.crunchlab?.completed || [];
-  const inProgress = save.crunchlab?.inProgress || {};
+  const completed = save[saveKey]?.completed || [];
+  const inProgress = save[saveKey]?.inProgress || {};
 
   const launchMission = (ch) => {
     setActiveMission(ch);
+    setReplay(completed.includes(ch.id)); // already done → replay, no rewards
     setMissionPhase("intro");
     setQIndex(0);
     setUserAnswer("");
@@ -2552,13 +2843,13 @@ function CrunchLabScreen({ save, setSave, theme, addXP, grantBadge, showToast, f
     const q = activeMission.questions[qIndex];
     const guess = Number(userAnswer.trim());
     if (guess === q.ans) {
-      setFeedback({ type: "correct", text: pickRandom(["🎯 Nailed it!", "⚡ Engineer brain activated!", "🏆 Correct!", "💥 That's it!", "🔬 Lab approved!"]) });
+      setFeedback({ type: "correct", text: pickRandom(["🎯 Nailed it!", "⚡ Brain activated!", "🏆 Correct!", "💥 That's it!", "🔬 Lab approved!"]) });
       setQCorrect((c) => [...c, qIndex]);
       setSave((s) => {
-        const ip = { ...(s.crunchlab?.inProgress || {}), [activeMission.id]: qIndex + 1 };
-        return { ...s, crunchlab: { ...s.crunchlab, inProgress: ip } };
+        const ip = { ...(s[saveKey]?.inProgress || {}), [activeMission.id]: qIndex + 1 };
+        return { ...s, [saveKey]: { ...s[saveKey], inProgress: ip } };
       });
-      addXP(20, 5);
+      if (!replay) addXP(xpPerQ, coinPerQ);
       setTimeout(() => {
         if (qIndex < activeMission.questions.length - 1) {
           setQIndex(qIndex + 1);
@@ -2569,67 +2860,79 @@ function CrunchLabScreen({ save, setSave, theme, addXP, grantBadge, showToast, f
         } else {
           setMissionPhase("debrief");
           fireConfetti();
-          grantBadge("rober_lab");
-          addXP(50, 20);
+          if (!replay) {
+            if (completeBadgeId) grantBadge(completeBadgeId);
+            addXP(completeXP, completeCoins);
+          }
           setSave((s) => {
-            const newCompleted = s.crunchlab.completed.includes(activeMission.id)
-              ? s.crunchlab.completed
-              : [...s.crunchlab.completed, activeMission.id];
-            const ip = { ...(s.crunchlab.inProgress || {}) };
+            const sec = s[saveKey] || { completed: [], inProgress: {} };
+            const newCompleted = sec.completed.includes(activeMission.id)
+              ? sec.completed
+              : [...sec.completed, activeMission.id];
+            const ip = { ...(sec.inProgress || {}) };
             delete ip[activeMission.id];
-            return { ...s, crunchlab: { completed: newCompleted, inProgress: ip } };
+            return { ...s, [saveKey]: { ...sec, completed: newCompleted, inProgress: ip } };
           });
         }
       }, 1100);
     } else {
       const newWrongs = wrongsThisQ + 1;
       setWrongsThisQ(newWrongs);
+      // Track mistakes for the perfect-run badge (Canes Corner), first play only
+      if (trackMistakes && !replay) {
+        setSave((s) => {
+          const sec = s[saveKey] || {};
+          return { ...s, [saveKey]: { ...sec, mistakes: (sec.mistakes || 0) + 1 } };
+        });
+      }
       const hintText = newWrongs >= 2
         ? `💡 Hint: ${q.hint}`
-        : pickRandom(["Not quite — think it through!", "Close! Try again, engineer!", "Hmm, re-read the problem.", "You got this! Check your math."]);
+        : pickRandom(["Not quite — think it through!", "Close! Try again!", "Hmm, re-read the problem.", "You got this! Check your math."]);
       setFeedback({ type: "wrong", text: hintText });
       setTimeout(() => {
         setFeedback(null);
         setUserAnswer("");
         setTimeout(() => inputRef.current?.focus(), 100);
-      }, 3200);
+      }, 3500);
     }
   };
 
   // ── Mission select ──────────────────────────────────────────
   if (!activeMission) {
-    const unlockedCount = CRUNCH_CHALLENGES.filter((c) => save.level >= c.unlockLevel).length;
+    const unlockedCount = alwaysUnlocked
+      ? missions.length
+      : missions.filter((c) => save.level >= c.unlockLevel).length;
     return (
       <div style={{ animation: "slideUp 0.4s" }}>
-        <BackBar back={back} title="🧪 CRUNCHLAB MISSIONS" theme={theme} />
+        <BackBar back={back} title={title} theme={theme} />
 
         <div style={{
-          background: "linear-gradient(135deg, #0a2010, #0f3020)",
-          border: "2px solid #00ff88",
+          background: `linear-gradient(135deg, ${accent}22, ${theme.panel})`,
+          border: `2px solid ${accent}`,
           borderRadius: 18,
           padding: 18,
           marginBottom: 20,
           display: "flex",
           alignItems: "center",
           gap: 14,
-          boxShadow: "0 0 40px #00ff8833",
+          boxShadow: `0 0 40px ${accent}33`,
         }}>
-          <div style={{ fontSize: 48 }}>🧪</div>
+          <div style={{ fontSize: 48 }}>{config.emoji}</div>
           <div>
-            <div className="display-font" style={{ fontSize: 22, fontWeight: 900, color: "#00ff88" }}>
-              Mark Rober's CrunchLab
+            <div className="display-font" style={{ fontSize: 22, fontWeight: 900, color: accent }}>
+              {blurbTitle}
             </div>
             <div style={{ fontSize: 13, lineHeight: 1.5, opacity: 0.85, marginTop: 2 }}>
-              Real science. Real engineering. Real math.<br />
-              <strong style={{ color: "#00ff88" }}>{unlockedCount}</strong> of {CRUNCH_CHALLENGES.length} missions unlocked •{" "}
+              {blurb}<br />
+              <strong style={{ color: accent }}>{unlockedCount}</strong> of {missions.length} {alwaysUnlocked ? "available" : "unlocked"} •{" "}
               <strong style={{ color: "#ffd700" }}>{completed.length}</strong> completed
             </div>
           </div>
         </div>
 
         <div style={{ display: "grid", gap: 10 }}>
-          {CRUNCH_CHALLENGES.map((ch) => {
-            const isLocked = save.level < ch.unlockLevel;
+          {missions.map((ch) => {
+            const isLocked = alwaysUnlocked ? false : save.level < ch.unlockLevel;
             const isDone = completed.includes(ch.id);
             const progress = inProgress[ch.id] || 0;
             return (
@@ -2673,6 +2976,15 @@ function CrunchLabScreen({ save, setSave, theme, addXP, grantBadge, showToast, f
           }}>
             {activeMission.tagline}
           </div>
+          {replay && (
+            <div style={{
+              background: "rgba(34,197,94,0.12)", border: "1px solid #22c55e66",
+              color: "#22c55e", borderRadius: 10, padding: "8px 12px", marginBottom: 16,
+              fontSize: 13, fontWeight: 900,
+            }}>
+              🔁 Replay mode — already complete, no XP or coins
+            </div>
+          )}
           <div style={{
             background: "rgba(0,0,0,0.3)",
             borderRadius: 14, padding: 14, marginBottom: 24,
@@ -2683,9 +2995,12 @@ function CrunchLabScreen({ save, setSave, theme, addXP, grantBadge, showToast, f
               📋 Mission Stats
             </div>
             <div style={{ fontSize: 14, lineHeight: 2 }}>
-              🧩 <strong>3 engineering questions</strong><br />
-              ⭐ <strong>+70 XP</strong> + <strong>25 coins</strong> on completion<br />
-              🏅 Earns the <strong>Rober Lab Engineer</strong> badge
+              🧩 <strong>{activeMission.questions.length} questions</strong><br />
+              ⭐ <strong>+{activeMission.questions.length * xpPerQ + completeXP} XP</strong> + <strong>{activeMission.questions.length * coinPerQ + completeCoins} coins</strong> on completion<br />
+              {completeBadgeId && (() => {
+                const b = ALL_BADGES.find((x) => x.id === completeBadgeId);
+                return b ? <>🏅 Earns the <strong>{b.name}</strong> badge</> : null;
+              })()}
             </div>
           </div>
           <BigButton onClick={startQuestions} theme={theme}>🚀 LAUNCH MISSION</BigButton>
@@ -2700,6 +3015,16 @@ function CrunchLabScreen({ save, setSave, theme, addXP, grantBadge, showToast, f
     return (
       <div style={{ animation: "slideUp 0.4s" }}>
         <BackBar back={() => setActiveMission(null)} title={activeMission.name} theme={theme} />
+
+        {replay && (
+          <div style={{
+            background: "rgba(34,197,94,0.12)", border: "1px solid #22c55e66",
+            color: "#22c55e", borderRadius: 10, padding: "6px 12px", marginBottom: 14,
+            fontSize: 12, fontWeight: 900, textAlign: "center",
+          }}>
+            🔁 Replay mode — no XP
+          </div>
+        )}
 
         {/* Progress dots */}
         <div style={{ display: "flex", gap: 10, justifyContent: "center", marginBottom: 20 }}>
@@ -2806,7 +3131,9 @@ function CrunchLabScreen({ save, setSave, theme, addXP, grantBadge, showToast, f
           MISSION COMPLETE!
         </div>
         <div style={{ fontSize: 16, opacity: 0.8, marginBottom: 22 }}>
-          +70 XP • +25 coins earned! 🎉
+          {replay
+            ? "Great practice run! (no XP in replay mode) 🔁"
+            : `+${activeMission.questions.length * xpPerQ + completeXP} XP • +${activeMission.questions.length * coinPerQ + completeCoins} coins earned! 🎉`}
         </div>
         <div style={{
           background: "rgba(0,0,0,0.35)",
@@ -2817,7 +3144,7 @@ function CrunchLabScreen({ save, setSave, theme, addXP, grantBadge, showToast, f
           <div className="pixel-font" style={{
             fontSize: 9, color: activeMission.color, letterSpacing: 2, marginBottom: 10,
           }}>
-            🔬 MARK ROBER SCIENCE FACT
+            {factLabel}
           </div>
           <div style={{ fontSize: 14, lineHeight: 1.8 }}>
             {activeMission.scienceFact}
@@ -2831,6 +3158,216 @@ function CrunchLabScreen({ save, setSave, theme, addXP, grantBadge, showToast, f
     </div>
   );
 }
+
+// ============================================================================
+// SCIENCE LAB — 12 experiment "missions", unlocked progressively by level.
+// Same question format as CrunchLab (q / ans / hint / unit).
+// ============================================================================
+const SCIENCE_LAB = [
+  {
+    id: "paper_rocket", name: "Paper Rocket Lab", emoji: "🚀", unlockLevel: 1, color: "#22d3ee",
+    tagline: "Fold, launch, and measure how far your paper rocket flies!",
+    scienceFact: "A rocket's nose cone shape changes how far it flies — a pointier cone cuts through the air with less drag. That's aerodynamics! ✈️",
+    questions: [
+      { q: "Your paper rocket flew 18 feet, then 15 feet, then 12 feet. How many feet total across all 3 launches?", ans: 45, hint: "18 + 15 + 12", unit: "feet" },
+      { q: "The best launch went 18 feet. The worst went 12 feet. How much farther was the best?", ans: 6, hint: "18 − 12", unit: "feet" },
+      { q: "You launch 4 rockets and each flies 15 feet. How many feet in all?", ans: 60, hint: "4 × 15", unit: "feet" },
+    ],
+  },
+  {
+    id: "slime_lab", name: "Slime Ingredient Lab", emoji: "🟢", unlockLevel: 1, color: "#34d399",
+    tagline: "Mix the perfect batch of stretchy slime using exact amounts!",
+    scienceFact: "Slime is a polymer — long chains of molecules that slide past each other, so it flows like a liquid but stretches like a solid! 🧪",
+    questions: [
+      { q: "A slime recipe needs 120 mL of glue and 80 mL of water. How many mL of liquid total?", ans: 200, hint: "120 + 80", unit: "mL" },
+      { q: "You make 3 batches. Each batch uses 2 cups of glue. How many cups of glue total?", ans: 6, hint: "3 × 2", unit: "cups" },
+      { q: "You added 10 drops of food coloring but the slime is too dark, so you remove 4 drops next time. How many drops in the new batch?", ans: 6, hint: "10 − 4", unit: "drops" },
+    ],
+  },
+  {
+    id: "super_ball", name: "Super Ball Bounce", emoji: "🔴", unlockLevel: 2, color: "#fb7185",
+    tagline: "Count the bounces and measure the bounce height!",
+    scienceFact: "Each bounce is lower than the last because energy turns into heat and sound. A ball never bounces back to the same height! 📉",
+    questions: [
+      { q: "A super ball bounces 9 times on the floor and 7 times off the wall. How many bounces total?", ans: 16, hint: "9 + 7", unit: "bounces" },
+      { q: "The ball drops from 50 inches and bounces back up 30 inches. How many inches lower is the bounce?", ans: 20, hint: "50 − 30", unit: "inches" },
+      { q: "You bounce the ball 5 times per second for 6 seconds. How many bounces?", ans: 30, hint: "5 × 6", unit: "bounces" },
+    ],
+  },
+  {
+    id: "marble_timer", name: "Marble Run Timer", emoji: "⏱️", unlockLevel: 3, color: "#a78bfa",
+    tagline: "Time a marble racing down your homemade track!",
+    scienceFact: "A steeper ramp makes the marble speed up faster because gravity pulls it down the slope harder. That's acceleration! 🏁",
+    questions: [
+      { q: "Marble A takes 8 seconds and Marble B takes 5 seconds. How many seconds faster is Marble B?", ans: 3, hint: "8 − 5", unit: "seconds" },
+      { q: "You run the track 7 times and each run takes 6 seconds. Total seconds?", ans: 42, hint: "7 × 6", unit: "seconds" },
+      { q: "The track has 4 loops and 3 ramps. How many pieces total?", ans: 7, hint: "4 + 3", unit: "pieces" },
+    ],
+  },
+  {
+    id: "color_mix", name: "Color Mixing Lab", emoji: "🎨", unlockLevel: 4, color: "#f472b6",
+    tagline: "Combine primary colors to discover how many you can make!",
+    scienceFact: "Red, blue, and yellow are primary colors. Mixing two at a time makes orange, green, and purple — the secondary colors! 🌈",
+    questions: [
+      { q: "You have 3 primary colors. Mixing them in pairs makes 3 new colors. How many colors do you have now in total?", ans: 6, hint: "3 + 3", unit: "colors" },
+      { q: "Each paint jar holds 250 mL. You have 4 jars. How many mL of paint total?", ans: 1000, hint: "250 × 4", unit: "mL" },
+      { q: "You used 8 drops of red and 5 drops of blue to make purple. How many drops total?", ans: 13, hint: "8 + 5", unit: "drops" },
+    ],
+  },
+  {
+    id: "tower_build", name: "Tower Builder", emoji: "🧱", unlockLevel: 5, color: "#fbbf24",
+    tagline: "Stack blocks into the tallest, sturdiest tower you can!",
+    scienceFact: "A wide base keeps a tall tower from tipping — engineers call this a low center of gravity. It's why skyscrapers have huge foundations! 🏗️",
+    questions: [
+      { q: "Each block is 4 inches tall. You stack 9 blocks. How tall is the tower?", ans: 36, hint: "4 × 9", unit: "inches" },
+      { q: "Your tower has 9 blocks. It falls and you rebuild with 6 more. How many blocks now?", ans: 15, hint: "9 + 6", unit: "blocks" },
+      { q: "The base layer uses 5 blocks and there are 7 layers the same size. How many blocks total?", ans: 35, hint: "5 × 7", unit: "blocks" },
+    ],
+  },
+  {
+    id: "volcano", name: "Baking Soda Volcano", emoji: "🌋", unlockLevel: 6, color: "#f97316",
+    tagline: "Make a fizzy eruption and measure the reaction!",
+    scienceFact: "Baking soda + vinegar makes carbon dioxide gas. The bubbles need to escape fast, so the foam erupts up and out! 💨",
+    questions: [
+      { q: "You pour 3 spoons of baking soda, then 4 more spoons. How many spoons total?", ans: 7, hint: "3 + 4", unit: "spoons" },
+      { q: "Each eruption uses 150 mL of vinegar. You do 3 eruptions. How many mL total?", ans: 450, hint: "150 × 3", unit: "mL" },
+      { q: "The foam rose 24 inches but you wanted 30 inches. How many more inches did you need?", ans: 6, hint: "30 − 24", unit: "inches" },
+    ],
+  },
+  {
+    id: "pendulum", name: "Pendulum Swing", emoji: "🪀", unlockLevel: 7, color: "#60a5fa",
+    tagline: "Swing a weight on a string and count the swings!",
+    scienceFact: "A longer string makes a pendulum swing slower. The length — not the weight — controls how fast it swings back and forth! ⏳",
+    questions: [
+      { q: "The pendulum swings 6 times in 10 seconds. How many swings in 30 seconds (3 times as long)?", ans: 18, hint: "6 × 3", unit: "swings" },
+      { q: "A short string swings 12 times and a long string swings 8 times. How many more does the short one swing?", ans: 4, hint: "12 − 8", unit: "swings" },
+      { q: "You test 5 different string lengths, twice each. How many tests total?", ans: 10, hint: "5 × 2", unit: "tests" },
+    ],
+  },
+  {
+    id: "balloon_car", name: "Balloon Rocket Car", emoji: "🎈", unlockLevel: 8, color: "#2dd4bf",
+    tagline: "Build a car powered by escaping balloon air!",
+    scienceFact: "The balloon pushes air backward, so the car gets pushed forward — Newton's 3rd Law: every action has an equal and opposite reaction! 🚗",
+    questions: [
+      { q: "Your balloon car traveled 14 feet, then 16 feet on the next try. How many feet total?", ans: 30, hint: "14 + 16", unit: "feet" },
+      { q: "Each car needs 4 wheels. You build 6 cars. How many wheels total?", ans: 24, hint: "4 × 6", unit: "wheels" },
+      { q: "The car went 16 feet but the record is 25 feet. How much farther to beat the record?", ans: 9, hint: "25 − 16", unit: "feet" },
+    ],
+  },
+  {
+    id: "crystals", name: "Crystal Growing Lab", emoji: "💎", unlockLevel: 9, color: "#c084fc",
+    tagline: "Grow sparkling crystals from a salty solution!",
+    scienceFact: "As water evaporates, the salt left behind lines up into repeating patterns — that's a crystal forming, one tiny layer at a time! ✨",
+    questions: [
+      { q: "Crystals grow about 2 mm each day. How much do they grow in 7 days?", ans: 14, hint: "2 × 7", unit: "mm" },
+      { q: "You add 3 spoons of salt to each of 5 jars. How many spoons of salt total?", ans: 15, hint: "3 × 5", unit: "spoons" },
+      { q: "A crystal is 14 mm and another is 9 mm. How much bigger is the first?", ans: 5, hint: "14 − 9", unit: "mm" },
+    ],
+  },
+  {
+    id: "egg_drop", name: "Egg Drop Challenge", emoji: "🥚", unlockLevel: 11, color: "#facc15",
+    tagline: "Design a package so the egg survives a big drop!",
+    scienceFact: "Padding spreads the crash over more time, so the egg feels a gentler force. That's the same idea as a car's crumple zone and airbags! 🛟",
+    questions: [
+      { q: "You drop the egg from 8 feet, then 10 feet, then 12 feet. How many feet total?", ans: 30, hint: "8 + 10 + 12", unit: "feet" },
+      { q: "You wrap the egg in 6 cotton balls on each of 4 sides. How many cotton balls total?", ans: 24, hint: "6 × 4", unit: "cotton balls" },
+      { q: "Out of 9 drops, 7 eggs survived. How many cracked?", ans: 2, hint: "9 − 7", unit: "eggs" },
+    ],
+  },
+  {
+    id: "solar_oven", name: "Pizza Box Solar Oven", emoji: "☀️", unlockLevel: 13, color: "#fb923c",
+    tagline: "Use sunlight and foil to cook a tasty treat!",
+    scienceFact: "Shiny foil reflects sunlight into the box and dark paper soaks up the heat — trapping warmth like a tiny greenhouse! 🔆",
+    questions: [
+      { q: "The oven heats 5 degrees every minute. How many degrees warmer after 9 minutes?", ans: 45, hint: "5 × 9", unit: "degrees" },
+      { q: "It started at 70 degrees and rose to 115 degrees. How many degrees did it climb?", ans: 45, hint: "115 − 70", unit: "degrees" },
+      { q: "You melt 3 marshmallows in each of 4 s'mores. How many marshmallows total?", ans: 12, hint: "3 × 4", unit: "marshmallows" },
+    ],
+  },
+];
+
+// ============================================================================
+// CANES CORNER — Carolina Hurricanes 2026 Stanley Cup celebration!
+// 4 "games" of 5 word problems each (20 total), always unlocked.
+// Stats use the real 2026 Cup roster — box-score style 2nd-grade math.
+// ============================================================================
+const CANES_RED = "#CC0000";
+const CANES_GAMES = [
+  {
+    id: "canes_aho", name: "Aho's Big Season", emoji: "🏒", unlockLevel: 0, color: CANES_RED,
+    tagline: "Crunch the numbers on captain Sebastian Aho's huge year!",
+    scienceFact: "A 'point' in hockey is a goal OR an assist added together. Sebastian Aho is one of the Hurricanes' all-time best playmakers! 🏒",
+    questions: [
+      { q: "Sebastian Aho scored 36 goals and had 54 assists. A point is a goal plus an assist — how many points did he have?", ans: 90, hint: "36 + 54", unit: "points" },
+      { q: "Aho had 90 points and Andrei Svechnikov had 68 points. How many more points did Aho have?", ans: 22, hint: "90 − 68", unit: "points" },
+      { q: "Aho scored a hat trick (3 goals) in 4 different games. How many goals was that in all?", ans: 12, hint: "3 × 4", unit: "goals" },
+      { q: "Aho took 12 shots in game 1 and 9 shots in game 2. How many shots total?", ans: 21, hint: "12 + 9", unit: "shots" },
+      { q: "Aho won 2 face-offs in each of 8 shifts. How many face-offs did he win?", ans: 16, hint: "2 × 8", unit: "face-offs" },
+    ],
+  },
+  {
+    id: "canes_goalie", name: "The Goalie Wall", emoji: "🥅", unlockLevel: 0, color: CANES_RED,
+    tagline: "Frederik Andersen and Pyotr Kochetkov shut the door!",
+    scienceFact: "A goalie's 'save' is every shot they stop. Frederik Andersen and Pyotr Kochetkov split the net for the Canes in 2026! 🥅",
+    questions: [
+      { q: "Frederik Andersen faced 23 shots and let in 1 goal. How many saves did he make?", ans: 22, hint: "23 − 1", unit: "saves" },
+      { q: "Pyotr Kochetkov made 30 saves in game 1 and 25 saves in game 2. How many saves total?", ans: 55, hint: "30 + 25", unit: "saves" },
+      { q: "Andersen had 4 shutouts and Kochetkov had 3 shutouts. How many shutouts together?", ans: 7, hint: "4 + 3", unit: "shutouts" },
+      { q: "Kochetkov made 40 saves in each of 3 playoff games. How many saves total?", ans: 120, hint: "40 × 3", unit: "saves" },
+      { q: "Andersen faced 35 shots and made 33 saves. How many goals got past him?", ans: 2, hint: "35 − 33", unit: "goals" },
+    ],
+  },
+  {
+    id: "canes_playoffs", name: "Playoff Push", emoji: "🔥", unlockLevel: 0, color: CANES_RED,
+    tagline: "The whole team battles through the 2026 playoffs!",
+    scienceFact: "Defensemen like Jaccob Slavin and Brady Skjei block shots with their bodies to protect the goalie — that's team defense! 🛡️",
+    questions: [
+      { q: "Andrei Svechnikov scored 5 playoff goals and Seth Jarvis scored 4. How many goals together?", ans: 9, hint: "5 + 4", unit: "goals" },
+      { q: "Jaccob Slavin blocked 6 shots per game for 5 games. How many shots did he block?", ans: 30, hint: "6 × 5", unit: "blocks" },
+      { q: "Martin Necas had 8 assists and 6 goals in the playoffs. How many points is that?", ans: 14, hint: "8 + 6", unit: "points" },
+      { q: "The Canes won 3 games, then won 4 more. How many playoff wins is that?", ans: 7, hint: "3 + 4", unit: "wins" },
+      { q: "Jesper Fast had 2 hits in each of 6 games. How many hits total?", ans: 12, hint: "2 × 6", unit: "hits" },
+    ],
+  },
+  {
+    id: "canes_final", name: "Stanley Cup Final", emoji: "🏆", unlockLevel: 0, color: CANES_RED,
+    tagline: "The Canes lift the 2026 Stanley Cup! Do the championship math!",
+    scienceFact: "A team must win 4 games to win a best-of-7 Stanley Cup Final. In 2026, the Carolina Hurricanes did exactly that! 🏆🎉",
+    questions: [
+      { q: "In Game 1 the Canes won 5 to 2. How many total goals were scored in the game?", ans: 7, hint: "5 + 2", unit: "goals" },
+      { q: "A team needs 4 wins to win the Cup. The Canes had 2 wins. How many more did they need?", ans: 2, hint: "4 − 2", unit: "wins" },
+      { q: "Brady Skjei scored 1 goal in each of 4 Final games. How many goals did he score?", ans: 4, hint: "1 × 4", unit: "goals" },
+      { q: "In their 4 wins the Canes scored 5, 3, 4, and 6 goals. How many goals in those games?", ans: 18, hint: "5 + 3 + 4 + 6", unit: "goals" },
+      { q: "25,000 fans came to Game 1 and 25,000 came to Game 2. How many fans total?", ans: 50000, hint: "25,000 + 25,000", unit: "fans" },
+    ],
+  },
+];
+
+// ── Module configs passed to <MissionModule> ─────────────────────────────
+const CRUNCHLAB_CONFIG = {
+  saveKey: "crunchlab", missions: CRUNCH_CHALLENGES, accent: "#00ff88", emoji: "🧪",
+  title: "🧪 CRUNCHLAB MISSIONS", blurbTitle: "Mark Rober's CrunchLab",
+  blurb: "Real science. Real engineering. Real math.",
+  factLabel: "🔬 MARK ROBER SCIENCE FACT", completeBadgeId: "rober_lab",
+  alwaysUnlocked: false, trackMistakes: false,
+  xpPerQ: 20, coinPerQ: 5, completeXP: 50, completeCoins: 20,
+};
+const SCIENCELAB_CONFIG = {
+  saveKey: "sciencelab", missions: SCIENCE_LAB, accent: "#22d3ee", emoji: "🔬",
+  title: "🔬 SCIENCE LAB", blurbTitle: "Brain Blast Science Lab",
+  blurb: "Run experiments, then solve the math behind them!",
+  factLabel: "🔬 SCIENCE DISCOVERY", completeBadgeId: "science_lab",
+  alwaysUnlocked: false, trackMistakes: false,
+  xpPerQ: 15, coinPerQ: 4, completeXP: 40, completeCoins: 15,
+};
+const CANES_CONFIG = {
+  saveKey: "canes", missions: CANES_GAMES, accent: CANES_RED, emoji: "🏒",
+  title: "🏒 CANES CORNER", blurbTitle: "Canes Corner — 2026 Champs!",
+  blurb: "Carolina Hurricanes won the 2026 Stanley Cup! 🏆",
+  factLabel: "🏒 HURRICANES FACT", completeBadgeId: null,
+  alwaysUnlocked: true, trackMistakes: true,
+  xpPerQ: 15, coinPerQ: 4, completeXP: 40, completeCoins: 15,
+};
 
 function ChallengeCard({ ch, isLocked, isDone, progress, theme, onLaunch }) {
   return (
@@ -3135,7 +3672,7 @@ function WeeklyTimeChart({ timeByDay, theme }) {
 // ============================================================================
 // SETTINGS
 // ============================================================================
-function Settings({ save, setSave, theme, back }) {
+function Settings({ save, setSave, theme, back, timeToday, timeAll }) {
   const [name, setName] = useState(save.name);
   const [confirmReset, setConfirmReset] = useState(false);
 
@@ -3146,6 +3683,11 @@ function Settings({ save, setSave, theme, back }) {
 
   const doReset = () => {
     setSave(defaultSave);
+    // Wipe the localStorage time tracker too
+    [TIME_K.all, TIME_K.today, TIME_K.todayDate, TIME_K.byDay].forEach((k) => {
+      try { localStorage.removeItem(k); } catch (e) {}
+      delete _timeMem[k];
+    });
     setConfirmReset(false);
     back();
   };
@@ -3216,7 +3758,7 @@ function Settings({ save, setSave, theme, back }) {
           }}>
             <div style={{ fontSize: 11, opacity: 0.65, marginBottom: 4 }}>Today</div>
             <div style={{ fontWeight: 900, fontSize: 24, color: "#a78bfa" }}>
-              {fmtTime(save.stats.secondsToday || 0)}
+              {fmtTime(timeToday != null ? timeToday : (save.stats.secondsToday || 0))}
             </div>
           </div>
           <div style={{
@@ -3225,13 +3767,13 @@ function Settings({ save, setSave, theme, back }) {
           }}>
             <div style={{ fontSize: 11, opacity: 0.65, marginBottom: 4 }}>All Time</div>
             <div style={{ fontWeight: 900, fontSize: 24, color: "#a78bfa" }}>
-              {fmtTime(save.stats.totalSecondsLearned || 0)}
+              {fmtTime(timeAll != null ? timeAll : (save.stats.totalSecondsLearned || 0))}
             </div>
           </div>
         </div>
 
         {/* 7-day bar chart */}
-        <WeeklyTimeChart timeByDay={save.stats.timeByDay || {}} theme={theme} />
+        <WeeklyTimeChart timeByDay={readByDay()} theme={theme} />
       </div>
 
       <div style={{
